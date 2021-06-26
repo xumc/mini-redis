@@ -10,6 +10,7 @@ import (
 type meta struct {
 	version      uint32
 	freelistPgid uint64
+	elePageCount uint64
 }
 
 type freelist struct {
@@ -17,6 +18,8 @@ type freelist struct {
 }
 
 func main() {
+	itemCount := 10
+
 	err := os.Remove("db")
 	if err != nil {
 		logrus.Fatalf("error when rm db. %s", err)
@@ -29,7 +32,7 @@ func main() {
 		logrus.Fatalf("error when load db file. %s\n", err.Error())
 	}
 
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < itemCount; i++ {
 		err = db.Set([]byte(fmt.Sprintf("hello%d", i)), []byte(fmt.Sprintf("world%d", i)))
 		if err != nil {
 			logrus.Fatalf("db set error. %s\n", err.Error())
@@ -63,7 +66,8 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("error when load db file. %s\n", err.Error())
 	}
-	for i := 0; i < 10000; i++ {
+
+	for i := 0; i < itemCount; i++ {
 		key := fmt.Sprintf("hello%d", i)
 		bs, err := db2.Get([]byte(key))
 		if err != nil && err != NotFoundError {

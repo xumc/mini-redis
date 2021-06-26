@@ -62,7 +62,7 @@ func initDbFile(path string) (*DB, error) {
 		panic(err.Error())
 	}
 
-	buf := make([]byte, os.Getpagesize() * (metaPageCount + freelistPageCount + indexPageCount +elePageCount))
+	buf := make([]byte, os.Getpagesize() * (metaPageCount + freelistPageCount + indexPageCount))
 
 	p := pageInBuffer(buf[:], 0)
 	p.id = 0

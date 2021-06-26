@@ -8,189 +8,113 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
-	"github.com/edsrzf/mmap-go"
-	"golang.org/x/sys/unix"
-	"io/ioutil"
+	"github.com/stretchr/testify/assert"
 	"os"
 	"path/filepath"
-	"syscall"
+	"strings"
 	"testing"
 )
 
-var testData = []byte("0123456789ABCDEF")
-var testPath = filepath.Join(os.TempDir(), "testdata")
-
-func init() {
-	f := openFile(os.O_RDWR | os.O_CREATE | os.O_TRUNC)
-	f.Write(testData)
-	f.Close()
+type op struct{
+	typ string // S => set, D => delete, G => get
+	key string
+	val string
 }
 
-func openFile(flags int) *os.File {
-	f, err := os.OpenFile(testPath, flags, 0644)
-	if err != nil {
-		panic(err.Error())
-	}
-	return f
-}
+func executeCases(t *testing.T, cases []op) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, t.Name() + "_db")
+	err := os.MkdirAll(filepath.Dir(path), 0777)
+	assert.Nil(t, err)
+	defer os.RemoveAll(dir)
 
-func TestUnmap(t *testing.T) {
-	f := openFile(os.O_RDONLY)
-	defer f.Close()
-	m, err := mmap.Map(f, mmap.RDONLY, 0)
-	if err != nil {
-		t.Errorf("error mapping: %s", err)
-	}
-	if err := m.Unmap(); err != nil {
-		t.Errorf("error unmapping: %s", err)
-	}
-}
+	db, err := LoadOrCreateDbFromFile(path)
+	assert.Nil(t, err)
 
-func TestMe(t *testing.T) {
-	f := openFile(os.O_RDWR)
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		t.Errorf(err.Error())
-	}
-	length := int(fi.Size())
-
-	m, err := unix.Mmap(int(f.Fd()), 0, length, unix.PROT_WRITE|unix.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
-		t.Errorf("error mapping: %s", err.Error())
-	}
-
-	db := struct{
-		mm []byte
-	}{
-		mm: m,
-	}
-
-	defer unix.Munmap(db.mm)
-
-	fmt.Println(string(db.mm))
-
-	db.mm[9] = 'X'
-	unix.Msync(db.mm, unix.MS_SYNC)
-
-	fileData, err := ioutil.ReadAll(f)
-	if err != nil {
-		t.Errorf("error reading file: %s", err)
-	}
-
-	fmt.Println(string(fileData))
-
-	// leave things how we found them
-	db.mm[9] = '9'
-	unix.Msync(db.mm, unix.MS_SYNC)
-}
-
-func TestReadWrite(t *testing.T) {
-	f := openFile(os.O_RDWR)
-	defer f.Close()
-	m, err := mmap.Map(f, mmap.RDWR, 0)
-	if err != nil {
-		t.Errorf("error mapping: %s", err)
-	}
-	defer m.Unmap()
-	if !bytes.Equal(testData, m) {
-		t.Errorf("data != testData: %q, %q", m, testData)
-	}
-
-	m[9] = 'X'
-	m.Flush()
-
-	fileData, err := ioutil.ReadAll(f)
-	if err != nil {
-		t.Errorf("error reading file: %s", err)
-	}
-	if !bytes.Equal(fileData, []byte("012345678XABCDEF")) {
-		t.Errorf("file wasn't modified")
-	}
-
-	// leave things how we found them
-	m[9] = '9'
-	m.Flush()
-}
-
-func TestProtFlagsAndErr(t *testing.T) {
-	f := openFile(os.O_RDONLY)
-	defer f.Close()
-	if _, err := mmap.Map(f, mmap.RDWR, 0); err == nil {
-		t.Errorf("expected error")
+	for _, op := range cases {
+		switch op.typ {
+		case "S":
+			err := db.SetString(op.key, op.val)
+			assert.Nil(t, err)
+		case "D":
+			err := db.DeleteString(op.key)
+			assert.Nil(t, err)
+		case "G":
+			v, err := db.GetString(op.key)
+			if err == NotFoundError {
+				assert.Equal(t, op.val, "not found")
+			} else {
+				assert.Equal(t, op.val, v)
+			}
+		}
 	}
 }
 
-func TestFlags(t *testing.T) {
-	f := openFile(os.O_RDWR)
-	defer f.Close()
-	m, err := mmap.Map(f, mmap.COPY, 0)
-	if err != nil {
-		t.Errorf("error mapping: %s", err)
+func Test_multi_op(t *testing.T) {
+	cs := []op{
+		{"S", "hello0", "world0"},
+		{"S", "hello1", "world1"},
+		{"S", "hello2", "world2"},
+		{"S", "hello3", "world3"},
+		{"S", "hello4", "world4"},
+		{"S", "hello5", "world5"},
+		{"S", "hello6", "world6"},
+		{"S", "hello7", "world7"},
+		{"S", "hello8", "world8"},
+		{"S", "hello9", "world9"},
+		{"S", "hello5", "1234567890"},
+		{"S", "hello6", "ABC"},
+		{"D", "hello0", ""},
+		{"D", "hello3", ""},
+		{"D", "hello5", ""},
+		{"D", "hello9", ""},
+		{"G", "hello0", "not found"},
+		{"G", "hello1", "world1"},
+		{"G", "hello2", "world2"},
+		{"G", "hello3", "not found"},
+		{"G", "hello4", "world4"},
+		{"G", "hello5", "not found"},
+		{"G", "hello6", "ABC"},
+		{"G", "hello7", "world7"},
+		{"G", "hello8", "world8"},
+		{"G", "hello9", "not found"},
 	}
-	defer m.Unmap()
 
-	m[9] = 'X'
-	m.Flush()
-
-	fileData, err := ioutil.ReadAll(f)
-	if err != nil {
-		t.Errorf("error reading file: %s", err)
-	}
-	if !bytes.Equal(fileData, testData) {
-		t.Errorf("file was modified")
-	}
+	executeCases(t, cs)
 }
 
-// Test that we can map files from non-0 offsets
-// The page size on most Unixes is 4KB, but on Windows it's 64KB
-func TestNonZeroOffset(t *testing.T) {
-	const pageSize = 65536
+func Test_large_kv(t *testing.T) {
+	largeKey := strings.Repeat("abc", 10000)
+	largeValue := strings.Repeat("abc", 10000)
 
-	// Create a 2-page sized file
-	bigFilePath := filepath.Join(os.TempDir(), "nonzero")
-	fileobj, err := os.OpenFile(bigFilePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		panic(err.Error())
-	}
+	t.Run("large value", func(t *testing.T){
 
-	bigData := make([]byte, 2*pageSize, 2*pageSize)
-	fileobj.Write(bigData)
-	fileobj.Close()
+		cases := []op{
+			{"S", "largeValue", largeValue},
+			{"G", "largeValue", largeValue},
+		}
 
-	// Map the first page by itself
-	fileobj, err = os.OpenFile(bigFilePath, os.O_RDONLY, 0)
-	if err != nil {
-		panic(err.Error())
-	}
-	m, err := mmap.MapRegion(fileobj, pageSize, mmap.RDONLY, 0, 0)
-	if err != nil {
-		t.Errorf("error mapping file: %s", err)
-	}
-	m.Unmap()
-	fileobj.Close()
+		executeCases(t, cases)
+	})
 
-	// Map the second page by itself
-	fileobj, err = os.OpenFile(bigFilePath, os.O_RDONLY, 0)
-	if err != nil {
-		panic(err.Error())
-	}
-	m, err = mmap.MapRegion(fileobj, pageSize, mmap.RDONLY, 0, pageSize)
-	if err != nil {
-		t.Errorf("error mapping file: %s", err)
-	}
-	err = m.Unmap()
-	if err != nil {
-		t.Error(err)
-	}
+	t.Run("large key", func(t *testing.T) {
+		cases := []op{
+			{"S", largeKey, "large_key"},
+			{"G", largeKey, "large_key"},
+		}
+		executeCases(t, cases)
+	})
 
-	m, err = mmap.MapRegion(fileobj, pageSize, mmap.RDONLY, 0, 1)
-	if err == nil {
-		t.Error("expect error because offset is not multiple of page size")
-	}
+	t.Run("large value and large key", func(t *testing.T){
+		cases := []op{
+			{"S", "largeValue", largeValue},
+			{"G", "largeValue", largeValue},
+			{"S", largeKey, "large_key"},
+			{"G", largeKey, "large_key"},
+		}
 
-	fileobj.Close()
+		executeCases(t, cases)
+	})
+
+
 }

@@ -8,7 +8,7 @@ type page struct {
 	id       int
 	flags    uint16
 	count    uint16
-	overflow uint32 // for pages with elePageFlag, overflow will be used only when create the first element page.
+	overflow uint32 // for pages with elePageFlag, overflow will be used only when create the first element
 	ptr      uintptr
 }
 
