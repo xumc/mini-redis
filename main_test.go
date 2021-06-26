@@ -30,6 +30,7 @@ func executeCases(t *testing.T, cases []op) {
 
 	db, err := LoadOrCreateDbFromFile(path)
 	assert.Nil(t, err)
+	defer db.Close()
 
 	for _, op := range cases {
 		switch op.typ {
@@ -115,6 +116,41 @@ func Test_large_kv(t *testing.T) {
 
 		executeCases(t, cases)
 	})
+}
 
+func Test_update(t *testing.T) {
+	t.Run("insufficient free space in page", func(t *testing.T) {
+		largeValue := strings.Repeat("abc", 1000000)
+		cases := []op{
+			{"S", "key", "small value"},
+			{"S", "key", largeValue},
+			{"G", "key", largeValue},
+		}
 
+		executeCases(t, cases)
+	})
+
+	t.Run("sufficient free space in page", func(t *testing.T) {
+		cases := []op{
+			{"S", "key", "small value"},
+			{"S", "key", "small value 2"},
+			{"G", "key", "small value 2"},
+		}
+
+		executeCases(t, cases)
+	})
+}
+
+func Test_delete(t *testing.T) {
+	t.Run("insufficient free space in page", func(t *testing.T) {
+		cases := []op{
+			{"S", "key", "value"},
+			{"D", "key", ""},
+			{"G", "key", "not found"},
+			{"D", "key", ""},
+			{"G", "key", "not found"},
+		}
+
+		executeCases(t, cases)
+	})
 }

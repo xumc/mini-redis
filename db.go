@@ -111,8 +111,12 @@ func (db *DB) Set(key, val []byte) error {
 	// found in index
 	err := db.updateExistingEle(key, val, ie)
 	if err == insufficientFreeSpaceInPageError {
-		// TODO remove the ele and then create new one.
-		logrus.Fatal("TODO : remove the ele and then create new one.")
+		// remove the ele and then create new one.
+		pg := db.page(ie.pgid)
+		es := pg.elements()
+		ele := &es.eles[ie.at]
+		ele.delete()
+		return db.createEle(key, val, preIe, ie)
 	}
 
 	return err
