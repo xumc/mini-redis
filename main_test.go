@@ -17,8 +17,8 @@ import (
 
 type op struct{
 	typ string // S => set, D => delete, G => get
-	key string
-	val string
+	key interface{}
+	val interface{}
 }
 
 func executeCases(t *testing.T, cases []op) {
@@ -35,13 +35,16 @@ func executeCases(t *testing.T, cases []op) {
 	for _, op := range cases {
 		switch op.typ {
 		case "S":
-			err := db.SetString(op.key, op.val)
+			err := db.SetString(op.key.(string), op.val.(string))
 			assert.Nil(t, err)
 		case "D":
-			err := db.DeleteString(op.key)
+			re, err := db.DeleteString(op.key.([]string)...)
+			for i, deleted := range re {
+				assert.Equal(t, op.val.([]bool)[i], deleted)
+			}
 			assert.Nil(t, err)
 		case "G":
-			v, err := db.GetString(op.key)
+			v, err := db.GetString(op.key.(string))
 			if err == NotFoundError {
 				assert.Equal(t, op.val, "not found")
 			} else {
@@ -65,10 +68,10 @@ func Test_multi_op(t *testing.T) {
 		{"S", "hello9", "world9"},
 		{"S", "hello5", "1234567890"},
 		{"S", "hello6", "ABC"},
-		{"D", "hello0", ""},
-		{"D", "hello3", ""},
-		{"D", "hello5", ""},
-		{"D", "hello9", ""},
+		{"D", []string{"hello0"}, []bool{true}},
+		{"D", []string{"hello3"}, []bool{true}},
+		{"D", []string{"hello5"}, []bool{true}},
+		{"D", []string{"hello9"}, []bool{true}},
 		{"G", "hello0", "not found"},
 		{"G", "hello1", "world1"},
 		{"G", "hello2", "world2"},
@@ -145,10 +148,21 @@ func Test_delete(t *testing.T) {
 	t.Run("insufficient free space in page", func(t *testing.T) {
 		cases := []op{
 			{"S", "key", "value"},
-			{"D", "key", ""},
+			{"D", []string{"key"}, []bool{true}},
 			{"G", "key", "not found"},
-			{"D", "key", ""},
+			{"D", []string{"key"}, []bool{false}},
 			{"G", "key", "not found"},
+		}
+
+		executeCases(t, cases)
+	})
+
+	t.Run("two keys", func(t *testing.T) {
+		cases := []op{
+			{"S", "key1", "value1"},
+			{"D", []string{"key1","key2"}, []bool{true, false}},
+			{"G", "key1", "not found"},
+			{"G", "key2", "not found"},
 		}
 
 		executeCases(t, cases)

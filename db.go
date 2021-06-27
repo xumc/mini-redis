@@ -142,22 +142,37 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	return ele.val(), nil
 }
 
-func (db *DB) DeleteString(key string) error {
-	return db.Delete([]byte(key))
+func (db *DB) DeleteString(keys ...string) ([]bool, error) {
+	bsKeys := make([][]byte, len(keys))
+	for  i, key := range keys {
+		bsKeys[i] = []byte(key)
+	}
+	return db.Delete(bsKeys...)
 }
 
-func (db *DB) Delete(key []byte) error {
-	_, ie := db.findIndexEleInChain(key)
-	if ie.pgid == 0 {
-		return nil
+func (db *DB) Delete(keys ...[]byte) ([]bool, error) {
+	result := make([]bool, len(keys))
+	for i, key := range keys {
+		_, ie := db.findIndexEleInChain(key)
+		if ie.pgid == 0{
+			result[i] = false
+			continue
+		}
+
+		pg := db.page(ie.pgid)
+		es := pg.elements()
+		ele := &es.eles[ie.at]
+
+		ele.delete()
+		result[i] = true
 	}
 
-	pg := db.page(ie.pgid)
-	es := pg.elements()
-	ele := &es.eles[ie.at]
+	err := db.flush()
+	if err != nil {
+		return nil, err
+	}
 
-	ele.delete()
-	return db.flush()
+	return result, nil
 }
 
 func (db *DB) createEleInPage(key, val []byte, ie *IndexEle, pg *page) error {

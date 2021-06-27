@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"github.com/sirupsen/logrus"
+	"io"
+	"net"
 )
 
 type meta struct {
@@ -21,11 +24,44 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("error when load db file. %s\n", err.Error())
 	}
+	defer func() {
+		err = db.Close()
+		if err != nil {
+			logrus.Fatalf("db close error. %s\n", err.Error())
+		}
+	}()
 
-	// TODO connection
-
-	err = db.Close()
+	port := 6379
+	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", "localhost", port))
 	if err != nil {
-		logrus.Fatalf("db close error. %s\n", err.Error())
+		logrus.Fatalf("listen tcp failed. %s\n", err.Error())
 	}
+
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			logrus.Errorf("accept tcp failed. %s\n", err.Error())
+		}
+
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				_, err := conn.Read(buf)
+				if err != nil {
+					if err == io.EOF {
+						err := conn.Close()
+						if err != nil {
+							logrus.Errorf("close error %s\n", err.Error())
+						}
+						return
+					}
+					logrus.Errorf("read from cli error %s\n", err.Error())
+				}
+				fmt.Print(string(buf))
+			}
+		}()
+	}
+
+
+
 }
