@@ -8,6 +8,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/stretchr/testify/assert"
 	"os"
 	"path/filepath"
@@ -15,7 +16,7 @@ import (
 	"testing"
 )
 
-type op struct{
+type op struct {
 	typ string // S => set, D => delete, G => get
 	key interface{}
 	val interface{}
@@ -23,7 +24,7 @@ type op struct{
 
 func executeCases(t *testing.T, cases []op) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, t.Name() + "_db")
+	path := filepath.Join(dir, t.Name()+"_db")
 	err := os.MkdirAll(filepath.Dir(path), 0777)
 	assert.Nil(t, err)
 	defer os.RemoveAll(dir)
@@ -52,6 +53,17 @@ func executeCases(t *testing.T, cases []op) {
 			}
 		}
 	}
+}
+
+func Test_rune(t *testing.T) {
+	fmt.Println([]byte(separator))
+	cs := []op{
+		{"S", "我是", "中国人"},
+		{"G", "我是", "中国人"},
+		{"D", []string{"我是"}, []bool{true}},
+	}
+
+	executeCases(t, cs)
 }
 
 func Test_multi_op(t *testing.T) {
@@ -91,7 +103,7 @@ func Test_large_kv(t *testing.T) {
 	largeKey := strings.Repeat("abc", 10000)
 	largeValue := strings.Repeat("abc", 10000)
 
-	t.Run("large value", func(t *testing.T){
+	t.Run("large value", func(t *testing.T) {
 
 		cases := []op{
 			{"S", "largeValue", largeValue},
@@ -109,7 +121,7 @@ func Test_large_kv(t *testing.T) {
 		executeCases(t, cases)
 	})
 
-	t.Run("large value and large key", func(t *testing.T){
+	t.Run("large value and large key", func(t *testing.T) {
 		cases := []op{
 			{"S", "largeValue", largeValue},
 			{"G", "largeValue", largeValue},
@@ -160,7 +172,7 @@ func Test_delete(t *testing.T) {
 	t.Run("two keys", func(t *testing.T) {
 		cases := []op{
 			{"S", "key1", "value1"},
-			{"D", []string{"key1","key2"}, []bool{true, false}},
+			{"D", []string{"key1", "key2"}, []bool{true, false}},
 			{"G", "key1", "not found"},
 			{"G", "key2", "not found"},
 		}

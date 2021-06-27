@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"github.com/sirupsen/logrus"
-	"io"
 	"net"
 )
 
@@ -32,10 +31,14 @@ func main() {
 	}()
 
 	port := 6379
+
+	logrus.Infof("listen on port %d", port)
+
 	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", "localhost", port))
 	if err != nil {
 		logrus.Fatalf("listen tcp failed. %s\n", err.Error())
 	}
+	defer l.Close()
 
 	for {
 		conn, err := l.Accept()
@@ -43,25 +46,6 @@ func main() {
 			logrus.Errorf("accept tcp failed. %s\n", err.Error())
 		}
 
-		go func() {
-			buf := make([]byte, 1024)
-			for {
-				_, err := conn.Read(buf)
-				if err != nil {
-					if err == io.EOF {
-						err := conn.Close()
-						if err != nil {
-							logrus.Errorf("close error %s\n", err.Error())
-						}
-						return
-					}
-					logrus.Errorf("read from cli error %s\n", err.Error())
-				}
-				fmt.Print(string(buf))
-			}
-		}()
+		go handleConn(conn, db)
 	}
-
-
-
 }
