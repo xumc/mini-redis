@@ -2,7 +2,7 @@
 
 This is an experimental project for me to learn database basic knowledge. It is not production ready project.Please DO NOT USE IT in production environment.
 
-it implement part of redis protocol, so you can use redis-cli to visit the db. See more in usage section.
+it implements part of redis protocol, so you can use redis-cli to visit the db. See more in usage section.
 
 It's welcome to contribute if you want to enrich yourself.
 
