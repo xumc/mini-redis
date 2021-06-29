@@ -8,7 +8,6 @@
 package main
 
 import (
-	"fmt"
 	"github.com/stretchr/testify/assert"
 	"os"
 	"path/filepath"
@@ -56,7 +55,6 @@ func executeCases(t *testing.T, cases []op) {
 }
 
 func Test_rune(t *testing.T) {
-	fmt.Println([]byte(separator))
 	cs := []op{
 		{"S", "我是", "中国人"},
 		{"G", "我是", "中国人"},

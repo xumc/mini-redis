@@ -23,12 +23,27 @@ func Test_commandReader(t *testing.T) {
 			"*3\r\n$3\r\ndel\r\n$2\r\nk1\r\n$2\r\nk2\r\n",
 			[]string{"del","k1","k2"},
 		},
+		{
+			"*3\r\n$3\r\nset\r\n$4\r\n*key\r\n$6\r\n$value\r\n",
+			[]string{"set","*key","$value"},
+		},
 	}
 
 	for _, c := range cases {
-		buf := bytes.NewReader([]byte(c.str))
-		cmdhdr := &commandHandler{Reader: buf}
+		stream := bytes.NewReader([]byte(c.str))
+		cmdhdr := &commandHandler{Reader: stream}
 
+		cmd, err := cmdhdr.Next()
+		assert.Nil(t, err)
+		assert.EqualValues(t, c.expect, cmd)
+	}
+
+	// complex case
+	joinedCaseStr := cases[0].str + cases[1].str + cases[2].str + cases[3].str
+	buf := bytes.NewReader([]byte(joinedCaseStr))
+	cmdhdr := &commandHandler{Reader: buf}
+
+	for _, c := range cases {
 		cmd, err := cmdhdr.Next()
 		assert.Nil(t, err)
 		assert.EqualValues(t, c.expect, cmd)

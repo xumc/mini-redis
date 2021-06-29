@@ -9,6 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 	"math/rand"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -37,12 +38,15 @@ var (
 	noUnfullPageError = errors.New("no unfull page error")
 
 	elePageCount = 0
+
 )
 
 type DB struct {
 	file     *os.File
 	data     []byte
 	pageSize uint64
+
+	mu  sync.Mutex
 }
 
 type IndexEle struct {
@@ -101,6 +105,9 @@ func (db *DB) SetString(key, val string) error {
 }
 
 func (db *DB) Set(key, val []byte) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	preIe, ie := db.findIndexEleInChain(key)
 
 	if ie.pgid == 0 {
@@ -128,6 +135,9 @@ func (db *DB) GetString(key string) (string, error) {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	_, ie := db.findIndexEleInChain(key)
 
 	if ie.pgid == 0 {
@@ -151,6 +161,9 @@ func (db *DB) DeleteString(keys ...string) ([]bool, error) {
 }
 
 func (db *DB) Delete(keys ...[]byte) ([]bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	result := make([]bool, len(keys))
 	for i, key := range keys {
 		_, ie := db.findIndexEleInChain(key)

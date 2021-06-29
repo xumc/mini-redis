@@ -16,67 +16,81 @@ const (
 
 var (
 	separator = []byte{13,10}
-	connectionBufSize = 7
+	connectionBufSize = 1024
 
 	invalidFormat = fmt.Errorf("invalid int when parse int.\n")
 )
 type commandHandler struct {
 	io.Reader
 	io.Writer
+	stream []byte
+}
+
+func newCommandHandler(conn net.Conn) *commandHandler {
+	return &commandHandler{
+		Reader: conn,
+		Writer: conn,
+		stream: make([]byte, 0),
+	}
 }
 
 func (crd *commandHandler) Next() ([]string, error) {
-	buf := make([]byte, connectionBufSize)
-
 	var strLinesCount string
-	var totalArgsCount int64
-	var argLen int64
-	var result = []string{}
+	var totalArgsCount int64 = -1
+	var argLen int64 = -1
+	var result = make([]string, 0)
 
 	var c int
 
-
-	stream := make([]byte, 0)
 	for {
+		buf := make([]byte, connectionBufSize)
 		n, err := crd.Read(buf)
 		if err != nil {
-			return nil, err
+			if err == io.EOF {
+				if c >= len(crd.stream) {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
 		}
 
-		stream = append(stream, buf[:n]...)
+		crd.stream = append(crd.stream, buf[:n]...)
 
-		for  {
-			p := bytes.Index(stream[c:], separator)
+		for {
+			p := bytes.Index(crd.stream[c:], separator)
 			if p == -1 {
 				break
 			}
 
-			switch stream[c] {
-			case '*':
-				strLinesCount = string(stream[c+1 : (c+p)])
+			if crd.stream[c] == '*' && totalArgsCount == -1 {
+				strLinesCount = string(crd.stream[c+1 : (c + p)])
 				var err error
 				totalArgsCount, err = strconv.ParseInt(strLinesCount, 10, 64)
 				if err != nil {
 					logrus.Errorf("invalid lines count %s. %s\n", strLinesCount, err)
 					return nil, invalidFormat
 				}
-			case '$':
-				strArgCount := string(stream[c+1 : (c+p)])
-				var err error
-				argLen, err = strconv.ParseInt(strArgCount, 10, 64)
-				if err != nil {
-					logrus.Errorf("invalid lines count %s. %s\n", strLinesCount, err)
-					return nil, invalidFormat
-				}
-			default:
-				arg := string(stream[c:(c + int(argLen))])
+			} else if crd.stream[c] == '$' && totalArgsCount != -1 && argLen == -1 {
+					strArgCount := string(crd.stream[c+1 : (c + p)])
+					var err error
+					argLen, err = strconv.ParseInt(strArgCount, 10, 64)
+					if err != nil {
+						logrus.Errorf("invalid lines count %s. %s\n", strLinesCount, err)
+						return nil, invalidFormat
+					}
+			} else {
+				arg := string(crd.stream[c:(c + int(argLen))])
 				result = append(result, arg)
-				if int64(len(result)) == totalArgsCount {
-					return  result, nil
-				}
+				argLen = -1
 			}
 
 			c = c + p + len(separator)
+
+			if int64(len(result)) == totalArgsCount {
+				crd.stream = crd.stream[c:]
+				return result, nil
+			}
 		}
 	}
 
@@ -104,9 +118,13 @@ func handleConn(conn net.Conn, db *DB) {
 		if r := recover(); r != nil {
 			logrus.Errorf("connection to %s failed due to reason: %s", conn.RemoteAddr().String(), r)
 		}
+		logrus.Debugf("connection closed. remote addr: %s", conn.RemoteAddr().String())
+		countMu.Lock()
+		connCount--
+		countMu.Unlock()
 	}()
 
-	cmdhdr := &commandHandler{Reader: conn, Writer: conn}
+	cmdhdr := newCommandHandler(conn)
 
 	for {
 		cmd, err := cmdhdr.Next()
@@ -114,14 +132,15 @@ func handleConn(conn net.Conn, db *DB) {
 			if err == io.EOF {
 				err := conn.Close()
 				if err != nil {
-					logrus.Fatalf("close error %s\n", err.Error())
+					logrus.Errorf("close error %s\n", err.Error())
 				}
 				return
 			} else {
 				logrus.Fatalf("error happened when parse command.")
 			}
-
 		}
+
+		logrus.Debugf("recv cmd: %s", cmd)
 
 		var switchError error
 		switch cmd[0] {
@@ -134,7 +153,7 @@ func handleConn(conn net.Conn, db *DB) {
 			val, err := db.GetString(cmd[1])
 			if err != nil {
 				if err == NotFoundError {
-					cmdhdr.WriteString(fmt.Sprintf("+(nil)\r\n"))
+					cmdhdr.WriteString(fmt.Sprintf("$-1\r\n"))
 				} else {
 					switchError = err
 				}

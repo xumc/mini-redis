@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"github.com/sirupsen/logrus"
 	"net"
+	"sync"
+	"time"
 )
 
 type meta struct {
@@ -16,8 +18,11 @@ type freelist struct {
 	ids [maxAllocSize]uint64
 }
 
+var connCount int
+var countMu = sync.Mutex{}
+
 func main() {
-	logrus.SetLevel(logrus.TraceLevel)
+	logrus.SetLevel(logrus.DebugLevel)
 
 	db, err := LoadOrCreateDbFromFile("db")
 	if err != nil {
@@ -40,11 +45,27 @@ func main() {
 	}
 	defer l.Close()
 
+	go func() {
+		tick := time.NewTicker(time.Second)
+		for {
+			<- tick.C
+			countMu.Lock()
+			fmt.Println("count: ", connCount)
+			countMu.Unlock()
+		}
+	}()
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			logrus.Errorf("accept tcp failed. %s\n", err.Error())
 		}
+
+		countMu.Lock()
+		connCount++
+		countMu.Unlock()
+
+		logrus.Infof("accept conn: remote addr: %s", conn.RemoteAddr().String())
 
 		go handleConn(conn, db)
 	}

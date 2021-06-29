@@ -4,6 +4,7 @@ import (
 	"errors"
 	"golang.org/x/sys/unix"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -42,6 +43,8 @@ func LoadOrCreateDbFromFile(path string) (*DB, error) {
 		file:     f,
 		data:     m,
 		pageSize: uint64(os.Getpagesize()),
+
+		mu: sync.Mutex{},
 	}
 
 	meta := db.page(0).meta()
