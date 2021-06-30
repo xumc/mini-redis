@@ -6,6 +6,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"net"
 	"net/http"
+	"os"
+	"strings"
+	"time"
 )
 
 type meta struct {
@@ -18,7 +21,21 @@ type freelist struct {
 	ids [maxAllocSize]uint64
 }
 
+type timeFormatter struct{}
+
+func (s *timeFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	timestamp := time.Now().Local().Format("2006/01/02 15:04:05")
+	msg := fmt.Sprintf("%s [%s] %s\n", timestamp, strings.ToUpper(entry.Level.String()), entry.Message)
+	return []byte(msg), nil
+}
+
 func main() {
+	err := os.RemoveAll("db")
+	if err != nil {
+		panic(err)
+	}
+
+	logrus.SetFormatter(&timeFormatter{})
 	logrus.SetLevel(logrus.InfoLevel)
 
 	db, err := LoadOrCreateDbFromFile("db")
@@ -56,7 +73,7 @@ func main() {
 
 		connCounterGauge.Inc()
 
-		logrus.Infof("accept conn: remote addr: %s", conn.RemoteAddr().String())
+		logrus.Debugf("accept conn: remote addr: %s", conn.RemoteAddr().String())
 
 		go handleConn(conn, db)
 	}

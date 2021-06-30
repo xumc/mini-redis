@@ -38,8 +38,6 @@ var (
 
 	noUnfullPageError = errors.New("no unfull page error")
 
-	elePageCount = 0
-
 )
 
 type DB struct {
@@ -411,7 +409,7 @@ func (db *DB) growPages(firstEleLen int) (firstPgid uint64, err error) {
 
 	var overflowPageCount uint32
 	pgids := make([]uint64, 0, incrementPageCount)
-	for i := metaPageCount + freelistPageCount + indexPageCount + elePageCount; i < (metaPageCount + freelistPageCount + indexPageCount + elePageCount + incrementPageCount); i++ {
+	for i := metaPageCount + freelistPageCount + indexPageCount + int(meta.elePageCount); i < (metaPageCount + freelistPageCount + indexPageCount + int(meta.elePageCount) + incrementPageCount); i++ {
 		if int64(overflowPageCount) * int64(db.pageSize) - int64(unsafe.Sizeof([elementsCountInOnePage]Ele{}) + unsafe.Sizeof(page{})) > int64(firstEleLen) {
 			pg := db.page(uint64(i))
 			pg.id = int(i)
@@ -431,15 +429,20 @@ func (db *DB) growPages(firstEleLen int) (firstPgid uint64, err error) {
 	copy(fl.ids[flPg.count:], pgids)
 	flPg.count += uint16(len(pgids))
 
-	firstPgid = uint64(metaPageCount + freelistPageCount + indexPageCount + elePageCount)
+	firstPgid = metaPageCount + freelistPageCount + indexPageCount + meta.elePageCount
+	meta.elePageCount += uint64(incrementPageCount)
 	pg := db.page(firstPgid)
 	pg.id = int(firstPgid)
 	pg.flags = elePageFlag
 	pg.count = 0
 	pg.overflow = overflowPageCount
 
-	meta.elePageCount += uint64(incrementPageCount)
 	logrus.Debugf("after grow up pages, elePageCount:%d", meta.elePageCount)
+
+	err = db.flush()
+	if err != nil {
+		return 0, err
+	}
 
 	return firstPgid, nil
 }

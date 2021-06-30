@@ -115,10 +115,10 @@ func (cmd *commandHandler) Write(bs []byte) error {
 
 func handleConn(conn net.Conn, db *DB) {
 	defer func() {
-		if r := recover(); r != nil {
-			logrus.Errorf("connection to %s failed due to reason: %s", conn.RemoteAddr().String(), r)
-		}
-		logrus.Debugf("connection closed. remote addr: %s", conn.RemoteAddr().String())
+		//if r := recover(); r != nil {
+		//	logrus.Errorf("connection to %s failed due to reason: %s", conn.RemoteAddr().String(), r)
+		//}
+		logrus.Infof("connection closed. remote addr: %s", conn.RemoteAddr().String())
 
 		connCounterGauge.Dec()
 	}()
@@ -126,7 +126,10 @@ func handleConn(conn net.Conn, db *DB) {
 	cmdhdr := newCommandHandler(conn)
 
 	for {
+		//s := time.Now()
 		cmd, err := cmdhdr.Next()
+		//logrus.Infof("%s cost %f", conn.RemoteAddr(), time.Now().Sub(s).Seconds())
+
 		if err != nil {
 			if err == io.EOF {
 				err := conn.Close()
@@ -158,7 +161,7 @@ func handleConn(conn net.Conn, db *DB) {
 					switchError = err
 				}
 			} else {
-				cmdhdr.WriteString(fmt.Sprintf("+%s\r\n",val))
+				cmdhdr.WriteString(fmt.Sprintf("$%d\r\n%s\r\n",len(val), val))
 			}
 		case "del":
 			var result []bool
