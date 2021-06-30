@@ -11,6 +11,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -105,8 +106,14 @@ func (db *DB) SetString(key, val string) error {
 }
 
 func (db *DB) Set(key, val []byte) error {
+	lstart := time.Now()
 	db.mu.Lock()
-	defer db.mu.Unlock()
+	defer func() {
+		db.mu.Unlock()
+		lockSetDuration.Observe(time.Now().Sub(lstart).Seconds())
+	}()
+
+	start := time.Now()
 
 	preIe, ie := db.findIndexEleInChain(key)
 
@@ -126,6 +133,7 @@ func (db *DB) Set(key, val []byte) error {
 		return db.createEle(key, val, preIe, ie)
 	}
 
+	pureSetDuration.Observe(time.Now().Sub(start).Seconds())
 	return err
 }
 

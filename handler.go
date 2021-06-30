@@ -119,9 +119,8 @@ func handleConn(conn net.Conn, db *DB) {
 			logrus.Errorf("connection to %s failed due to reason: %s", conn.RemoteAddr().String(), r)
 		}
 		logrus.Debugf("connection closed. remote addr: %s", conn.RemoteAddr().String())
-		countMu.Lock()
-		connCount--
-		countMu.Unlock()
+
+		connCounterGauge.Dec()
 	}()
 
 	cmdhdr := newCommandHandler(conn)
@@ -141,6 +140,7 @@ func handleConn(conn net.Conn, db *DB) {
 		}
 
 		logrus.Debugf("recv cmd: %s", cmd)
+		recvCmdCount.Inc()
 
 		var switchError error
 		switch cmd[0] {

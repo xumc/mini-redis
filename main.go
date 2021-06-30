@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"net"
-	"sync"
-	"time"
+	"net/http"
 )
 
 type meta struct {
@@ -18,11 +18,8 @@ type freelist struct {
 	ids [maxAllocSize]uint64
 }
 
-var connCount int
-var countMu = sync.Mutex{}
-
 func main() {
-	logrus.SetLevel(logrus.DebugLevel)
+	logrus.SetLevel(logrus.InfoLevel)
 
 	db, err := LoadOrCreateDbFromFile("db")
 	if err != nil {
@@ -46,13 +43,9 @@ func main() {
 	defer l.Close()
 
 	go func() {
-		tick := time.NewTicker(time.Second)
-		for {
-			<- tick.C
-			countMu.Lock()
-			fmt.Println("count: ", connCount)
-			countMu.Unlock()
-		}
+		http.Handle("/metrics", promhttp.Handler())
+		err := http.ListenAndServe(":8082", nil)
+		logrus.Fatalf("unpected error when listen http server. %s", err.Error())
 	}()
 
 	for {
@@ -61,9 +54,7 @@ func main() {
 			logrus.Errorf("accept tcp failed. %s\n", err.Error())
 		}
 
-		countMu.Lock()
-		connCount++
-		countMu.Unlock()
+		connCounterGauge.Inc()
 
 		logrus.Infof("accept conn: remote addr: %s", conn.RemoteAddr().String())
 
