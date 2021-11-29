@@ -14,6 +14,7 @@ import (
 type meta struct {
 	version      uint32
 	freelistPgid uint64
+	checkpoint   uint64
 	elePageCount uint64
 }
 
@@ -25,20 +26,23 @@ type timeFormatter struct{}
 
 func (s *timeFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	timestamp := time.Now().Local().Format("2006/01/02 15:04:05")
-	msg := fmt.Sprintf("%s [%s] %s\n", timestamp, strings.ToUpper(entry.Level.String()), entry.Message)
+	msg := fmt.Sprintf("%s [%d] [%s] %s\n", timestamp, os.Getpid(), strings.ToUpper(entry.Level.String()), entry.Message)
 	return []byte(msg), nil
 }
-
 func main() {
-	err := os.RemoveAll("db")
+	err := os.RemoveAll("data")
+	if err != nil {
+		panic(err)
+	}
+	err = os.MkdirAll("data", 0777)
 	if err != nil {
 		panic(err)
 	}
 
 	logrus.SetFormatter(&timeFormatter{})
-	logrus.SetLevel(logrus.InfoLevel)
+	logrus.SetLevel(logrus.DebugLevel)
 
-	db, err := LoadOrCreateDbFromFile("db")
+	db, err := LoadOrCreateDbFromDir("data")
 	if err != nil {
 		logrus.Fatalf("error when load db file. %s\n", err.Error())
 	}
@@ -53,7 +57,7 @@ func main() {
 
 	logrus.Infof("listen on port %d", port)
 
-	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", "localhost", port))
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		logrus.Fatalf("listen tcp failed. %s\n", err.Error())
 	}
@@ -64,6 +68,9 @@ func main() {
 		err := http.ListenAndServe(":8082", nil)
 		logrus.Fatalf("unpected error when listen http server. %s", err.Error())
 	}()
+	startMonitor()
+
+	db.serving = true
 
 	for {
 		conn, err := l.Accept()
@@ -71,7 +78,7 @@ func main() {
 			logrus.Errorf("accept tcp failed. %s\n", err.Error())
 		}
 
-		connCounterGauge.Inc()
+		connCounterMetric.Inc()
 
 		logrus.Debugf("accept conn: remote addr: %s", conn.RemoteAddr().String())
 

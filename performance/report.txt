@@ -1,10 +1,40 @@
+hardware:
+Mac mini (M1, 2020)
+Apple M1
+8 GB Memory
+
 mini-redis:
 1.586880708
 1.790789
 1.707833
 
+mini-redis without db.flush.
+0.708956
+0.697994
+0.647507
 
-redis:
+redis with default config:
 0.629117
 0.638521
 0.884537
+
+redis with appendonly always
+ 1.048587
+ 1.010516
+ 0.983279
+
+ -----------------------------
+ hardware:
+ Intel(R) Core(TM) i5-9400 CPU @ 2.90GHz
+ 8GB memory
+
+mini-redis with wal:
+ 172.207531
+ 189.555628
+ 180.483988
+
+redis with appendonly always
+ 181.103829
+ 181.499487
+ 162.560612
+

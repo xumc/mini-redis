@@ -9,6 +9,8 @@ import (
 	"golang.org/x/sys/unix"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -20,24 +22,22 @@ const (
 	metaPageFlag     = 0x04
 	freelistPageFlag = 0x10
 
-	metaPageCount     = 1
-	freelistPageCount = 1
-	indexPageCount    = 64
-	elePageIncrementCount = 8
+	metaPageCount         = 1
+	freelistPageCount     = 1
+	elePageIncrementCount = 64
 
-	elementsCountInOnePage = uint32(256)
-	hashedBitCount         = 16 // 2 ^ 16 = 65536
-
+	walMaxSize            = 1024 * 1024
 	maxAllocSize = 0x7FFFFFFF
 )
 
 var (
+	indexPageCount = 1 << 16 * int(unsafe.Sizeof(IndexEle{})) / os.Getpagesize()
+
 	NotFoundError = errors.New("not found")
 
 	insufficientFreeSpaceInPageError = errors.New("insufficient free space")
 
 	noUnfullPageError = errors.New("no unfull page error")
-
 )
 
 type DB struct {
@@ -45,7 +45,13 @@ type DB struct {
 	data     []byte
 	pageSize uint64
 
-	mu  sync.Mutex
+	wal *os.File
+	undo *os.File
+
+	mu       sync.Mutex
+	serving  bool
+	crashKey []byte // used for UT testing only
+	dataDir  string
 }
 
 type IndexEle struct {
@@ -96,19 +102,29 @@ func (db *DB) Close() error {
 		return err
 	}
 
-	return db.file.Close()
+	err = db.file.Close()
+	if err != nil {
+		return err
+	}
+
+	err = db.wal.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (db *DB) SetString(key, val string) error {
-	return db.Set([]byte(key), []byte(val))
+func (db *DB) SetString(originCmd []byte, key, val string) error {
+	return db.Set(originCmd, []byte(key), []byte(val))
 }
 
-func (db *DB) Set(key, val []byte) error {
+func (db *DB) Set(originCmd []byte, key, val []byte) error {
 	lstart := time.Now()
 	db.mu.Lock()
 	defer func() {
 		db.mu.Unlock()
-		lockSetDuration.Observe(time.Now().Sub(lstart).Seconds())
+		lockSetDurationMetric.Set(time.Now().Sub(lstart).Seconds())
 	}()
 
 	start := time.Now()
@@ -117,21 +133,32 @@ func (db *DB) Set(key, val []byte) error {
 
 	if ie.pgid == 0 {
 		// no found in index
-		return db.createEle(key, val, preIe, ie)
+		err := db.createEle(key, val, preIe, ie)
+		if err != nil {
+			return err
+		}
+	} else {
+		// found in index
+		err := db.updateExistingEle(key, val, ie)
+		if err == insufficientFreeSpaceInPageError {
+			// remove the ele and then create new one.
+			pg := db.page(ie.pgid)
+			es := pg.elements()
+			ele := &es.eles[ie.at]
+			ele.delete()
+			err = db.createEle(key, val, preIe, ie)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
-	// found in index
-	err := db.updateExistingEle(key, val, ie)
-	if err == insufficientFreeSpaceInPageError {
-		// remove the ele and then create new one.
-		pg := db.page(ie.pgid)
-		es := pg.elements()
-		ele := &es.eles[ie.at]
-		ele.delete()
-		return db.createEle(key, val, preIe, ie)
+	err := db.persist(originCmd)
+	if err != nil {
+		return err
 	}
 
-	pureSetDuration.Observe(time.Now().Sub(start).Seconds())
+	pureSetDurationMetric.Set(time.Now().Sub(start).Seconds())
 	return err
 }
 
@@ -141,9 +168,15 @@ func (db *DB) GetString(key string) (string, error) {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	lstart := time.Now()
 
+	db.mu.Lock()
+	defer func() {
+		db.mu.Unlock()
+		lockGetDurationMetric.Set(time.Now().Sub(lstart).Seconds())
+	}()
+
+	start := time.Now()
 	_, ie := db.findIndexEleInChain(key)
 
 	if ie.pgid == 0 {
@@ -155,25 +188,33 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	es := pg.elements()
 	ele := &es.eles[ie.at]
 
+	pureGetDurationMetric.Set(time.Now().Sub(start).Seconds())
 	return ele.val(), nil
 }
 
-func (db *DB) DeleteString(keys ...string) ([]bool, error) {
+func (db *DB) DeleteString(originCmd []byte, keys ...string) ([]bool, error) {
 	bsKeys := make([][]byte, len(keys))
-	for  i, key := range keys {
+	for i, key := range keys {
 		bsKeys[i] = []byte(key)
 	}
-	return db.Delete(bsKeys...)
+	return db.Delete(originCmd, bsKeys...)
 }
 
-func (db *DB) Delete(keys ...[]byte) ([]bool, error) {
+func (db *DB) Delete(originCmd []byte, keys ...[]byte) ([]bool, error) {
+	lstart := time.Now()
+
 	db.mu.Lock()
-	defer db.mu.Unlock()
+	defer func() {
+		db.mu.Unlock()
+		lockDelDurationMetric.Set(time.Now().Sub(lstart).Seconds())
+	}()
+
+	start := time.Now()
 
 	result := make([]bool, len(keys))
 	for i, key := range keys {
 		_, ie := db.findIndexEleInChain(key)
-		if ie.pgid == 0{
+		if ie.pgid == 0 {
 			result[i] = false
 			continue
 		}
@@ -186,11 +227,12 @@ func (db *DB) Delete(keys ...[]byte) ([]bool, error) {
 		result[i] = true
 	}
 
-	err := db.flush()
+	err := db.persist(originCmd)
 	if err != nil {
 		return nil, err
 	}
 
+	pureDelDurationMetric.Set(time.Now().Sub(start).Seconds())
 	return result, nil
 }
 
@@ -226,11 +268,11 @@ func (db *DB) createEleInPage(key, val []byte, ie *IndexEle, pg *page) error {
 
 	ie.pgid = uint64(pg.id)
 	ie.at = pg.count
-	logrus.Debugf("created ele. %s => pgid: %d, at: %d\n", string(key), ie.pgid, ie.at)
+	logrus.Debugf("created ele. %s => pgid: %d, at: %d", string(key), ie.pgid, ie.at)
 
 	pg.count++
 
-	return db.flush()
+	return nil
 }
 
 func (db *DB) createEle(key, val []byte, preIe, ie *IndexEle) error {
@@ -324,12 +366,12 @@ func (db *DB) updateExistingEle(key, val []byte, ie *IndexEle) error {
 	ele.kSize = uint32(len(key))
 	ele.vSize = uint32(len(val))
 
-	return db.flush()
+	return nil
 }
 
 func (db *DB) findIndexEleInChain(key []byte) (preIe, ie *IndexEle) {
 	hbs := md5.Sum(key)
-	hashedPos := binary.BigEndian.Uint16(hbs[:hashedBitCount])
+	hashedPos := binary.BigEndian.Uint16(hbs[:])
 
 	pos := uint64(hashedPos)*uint64(unsafe.Sizeof(IndexEle{})) + (metaPageCount+freelistPageCount)*db.pageSize
 	ie = (*IndexEle)(unsafe.Pointer(&db.data[pos]))
@@ -363,8 +405,8 @@ func (db *DB) findIndexEleInChain(key []byte) (preIe, ie *IndexEle) {
 }
 
 func (db *DB) getUnfullPgid() (uint64, error) {
-	pgid := db.page(0).meta().freelistPgid
-	pg := db.page(pgid)
+	meta := db.page(0).meta()
+	pg := db.page(meta.freelistPgid)
 	fl := pg.freelist()
 
 	if pg.count == 0 {
@@ -373,13 +415,15 @@ func (db *DB) getUnfullPgid() (uint64, error) {
 
 	rand := rand.Intn(int(pg.count))
 
-	pgid = fl.ids[rand]
-	logrus.Debugf("geted unfull pgid %d\n", pgid)
+	pgid := fl.ids[rand]
+	logrus.Debugf("geted unfull pgid %d, pg.count: %d", pgid, pg.count)
 	return pgid, nil
 }
 
 func (db *DB) growPages(firstEleLen int) (firstPgid uint64, err error) {
 	meta := db.page(0).meta()
+	flPg := db.page(meta.freelistPgid)
+	fl := flPg.freelist()
 	logrus.Debugf("before grow up pages, elePageCount:%d", meta.elePageCount)
 	fstat, err := db.file.Stat()
 	if err != nil {
@@ -387,19 +431,17 @@ func (db *DB) growPages(firstEleLen int) (firstPgid uint64, err error) {
 	}
 
 	var incrementalSize = int64(elePageIncrementCount * db.pageSize)
-	incrementalCount := int64(firstEleLen+ int(unsafe.Sizeof(page{})) + int(unsafe.Sizeof([elementsCountInOnePage]Ele{})))/incrementalSize + 1
+	incrementalCount := int64(firstEleLen+int(unsafe.Sizeof(page{}))+int(unsafe.Sizeof([elementsCountInOnePage]Ele{})))/incrementalSize + 1
 
-	err = db.file.Truncate(fstat.Size() + incrementalCount * incrementalSize)
-    if err != nil {
-    	return 0, err
-	}
-
-	fstat, err = db.file.Stat()
+	newFileSize := fstat.Size() + incrementalCount*incrementalSize
+	err = db.file.Truncate(newFileSize)
 	if err != nil {
 		return 0, err
 	}
 
-	m, err := unix.Mmap(int(db.file.Fd()), 0, int(fstat.Size()), unix.PROT_READ|unix.PROT_WRITE, syscall.MAP_SHARED)
+	dbFileSizeMetric.Set(float64(newFileSize))
+
+	m, err := unix.Mmap(int(db.file.Fd()), 0, int(newFileSize), unix.PROT_READ|unix.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		return 0, err
 	}
@@ -410,27 +452,41 @@ func (db *DB) growPages(firstEleLen int) (firstPgid uint64, err error) {
 	var overflowPageCount uint32
 	pgids := make([]uint64, 0, incrementPageCount)
 	for i := metaPageCount + freelistPageCount + indexPageCount + int(meta.elePageCount); i < (metaPageCount + freelistPageCount + indexPageCount + int(meta.elePageCount) + incrementPageCount); i++ {
-		if int64(overflowPageCount) * int64(db.pageSize) - int64(unsafe.Sizeof([elementsCountInOnePage]Ele{}) + unsafe.Sizeof(page{})) > int64(firstEleLen) {
+		if int64(overflowPageCount)*int64(db.pageSize)-int64(unsafe.Sizeof([elementsCountInOnePage]Ele{})+unsafe.Sizeof(page{})) > int64(firstEleLen) {
 			pg := db.page(uint64(i))
 			pg.id = int(i)
 			pg.flags = elePageFlag
 			pg.count = 0
 			pg.overflow = 1
-			pgids = append(pgids, uint64(i))
 		} else {
 			overflowPageCount++
 		}
-
+		pgids = append(pgids, uint64(i))
 	}
 
-	flPg := db.page(meta.freelistPgid)
-	fl := flPg.freelist()
+	maxFreePageCount := (db.pageSize - uint64(unsafe.Sizeof(page{}))) >> 3
+	allFreePagesCount := int(flPg.count) + len(pgids)
+	if uint64(allFreePagesCount) > maxFreePageCount {
+		pgCountMap := make(map[uint64]uint16)
+		for _, pgid := range fl.ids[:flPg.count] {
+			pgCountMap[pgid] = db.page(pgid).count
+		}
 
-	copy(fl.ids[flPg.count:], pgids)
-	flPg.count += uint16(len(pgids))
+		sort.Slice(fl.ids[:flPg.count], func(i, j int) bool {
+			return pgCountMap[fl.ids[:flPg.count][i]] > pgCountMap[fl.ids[:flPg.count][j]]
+		})
+		discardedPages := fl.ids[:len(pgids)]
+		logrus.Infof("pages%v will be discarded even they are not full", discardedPages)
 
-	firstPgid = metaPageCount + freelistPageCount + indexPageCount + meta.elePageCount
+		copy(fl.ids[:len(pgids)], pgids) // discard some pages
+	} else {
+		copy(fl.ids[flPg.count:], pgids)
+		flPg.count += uint16(len(pgids))
+	}
+
+	firstPgid = pgids[0]
 	meta.elePageCount += uint64(incrementPageCount)
+
 	pg := db.page(firstPgid)
 	pg.id = int(firstPgid)
 	pg.flags = elePageFlag
@@ -447,6 +503,79 @@ func (db *DB) growPages(firstEleLen int) (firstPgid uint64, err error) {
 	return firstPgid, nil
 }
 
+func (db *DB) persist(originCmd []byte) error {
+	if !db.serving {
+		return nil
+	}
+	_, err := db.wal.Write(originCmd)
+	if err != nil {
+		return err
+	}
+
+	err = syncFile(db.wal)
+	if err != nil {
+		return err
+	}
+
+	stat, err := db.wal.Stat()
+	if err != nil {
+		return err
+	}
+
+	if len(db.crashKey) > 0 && bytes.Contains(originCmd, db.crashKey) {
+		panic("db crashed")
+	}
+
+	meta := db.page(0).meta()
+	walFileSizeMetric.Set(float64(stat.Size()))
+	walCheckpointMetric.Set(float64(meta.checkpoint))
+
+	checkpoint := stat.Size()
+	if stat.Size() > walMaxSize {
+		err = db.wal.Close()
+		if err != nil {
+			return err
+		}
+
+		walPath := filepath.Join(db.dataDir,stat.Name())
+		wal, err := os.OpenFile(walPath, os.O_RDONLY, 0644)
+		if err != nil {
+			return err
+		}
+		buffer := make([]byte, stat.Size() - int64(meta.checkpoint))
+		n, err := wal.ReadAt(buffer, int64(meta.checkpoint))
+		if err != nil {
+			return err
+		}
+
+		err = wal.Close()
+		if err != nil {
+			return err
+		}
+
+		err = os.Truncate(walPath, 0)
+		if err != nil {
+			return err
+		}
+
+		wal, err = os.OpenFile(walPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+
+		_, err = wal.Write(buffer[:n])
+		if err != nil {
+			return err
+		}
+
+		db.wal = wal
+		checkpoint = 0
+	}
+
+	meta.checkpoint = uint64(checkpoint)
+
+	return nil
+}
 
 func (db *DB) flush() error {
 	return unix.Msync(db.data, unix.MS_SYNC)
@@ -467,9 +596,12 @@ func (db *DB) removeFullPgid(rmPgid uint64) {
 			copy(fl.ids[i:], fl.ids[(i+1):pg.count])
 			pg.count--
 
-			logrus.Debugf("remove full pgid %d\n", rmPgid)
+			logrus.Infof("remove full pgid %d\n", rmPgid)
 			return
 		}
 	}
 }
 
+func (db *DB) setCrashKey(key []byte) {
+	db.crashKey = key // used for UT testing only
+}

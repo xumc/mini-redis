@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"github.com/stretchr/testify/assert"
+	"io/ioutil"
 	"testing"
 )
 
@@ -29,14 +30,20 @@ func Test_commandReader(t *testing.T) {
 		},
 	}
 
+	bs := make([]byte, 0)
 	for _, c := range cases {
 		stream := bytes.NewReader([]byte(c.str))
 		cmdhdr := &commandHandler{Reader: stream}
 
-		cmd, err := cmdhdr.Next()
+		oriCmd, cmd, err := cmdhdr.Next()
 		assert.Nil(t, err)
+		assert.Equal(t, c.str, string(oriCmd))
 		assert.EqualValues(t, c.expect, cmd)
+
+		bs = append(bs, oriCmd...)
+
 	}
+	ioutil.WriteFile("wal", bs, 777)
 
 	// complex case
 	joinedCaseStr := cases[0].str + cases[1].str + cases[2].str + cases[3].str
@@ -44,8 +51,9 @@ func Test_commandReader(t *testing.T) {
 	cmdhdr := &commandHandler{Reader: buf}
 
 	for _, c := range cases {
-		cmd, err := cmdhdr.Next()
+		oriCmd, cmd, err := cmdhdr.Next()
 		assert.Nil(t, err)
+		assert.Equal(t, c.str, string(oriCmd))
 		assert.EqualValues(t, c.expect, cmd)
 	}
 }

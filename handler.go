@@ -23,18 +23,20 @@ var (
 type commandHandler struct {
 	io.Reader
 	io.Writer
+	io.Closer
 	stream []byte
 }
 
-func newCommandHandler(conn net.Conn) *commandHandler {
+func newCommandHandler(r io.Reader, w io.Writer, c io.Closer) *commandHandler {
 	return &commandHandler{
-		Reader: conn,
-		Writer: conn,
+		Reader: r,
+		Writer: w,
+		Closer: c,
 		stream: make([]byte, 0),
 	}
 }
 
-func (crd *commandHandler) Next() ([]string, error) {
+func (crd *commandHandler) Next() ([]byte, []string, error) {
 	var strLinesCount string
 	var totalArgsCount int64 = -1
 	var argLen int64 = -1
@@ -48,10 +50,10 @@ func (crd *commandHandler) Next() ([]string, error) {
 		if err != nil {
 			if err == io.EOF {
 				if c >= len(crd.stream) {
-					return nil, err
+					return nil, nil, err
 				}
 			} else {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -69,7 +71,7 @@ func (crd *commandHandler) Next() ([]string, error) {
 				totalArgsCount, err = strconv.ParseInt(strLinesCount, 10, 64)
 				if err != nil {
 					logrus.Errorf("invalid lines count %s. %s\n", strLinesCount, err)
-					return nil, invalidFormat
+					return nil, nil, invalidFormat
 				}
 			} else if crd.stream[c] == '$' && totalArgsCount != -1 && argLen == -1 {
 					strArgCount := string(crd.stream[c+1 : (c + p)])
@@ -77,7 +79,7 @@ func (crd *commandHandler) Next() ([]string, error) {
 					argLen, err = strconv.ParseInt(strArgCount, 10, 64)
 					if err != nil {
 						logrus.Errorf("invalid lines count %s. %s\n", strLinesCount, err)
-						return nil, invalidFormat
+						return nil, nil, invalidFormat
 					}
 			} else {
 				arg := string(crd.stream[c:(c + int(argLen))])
@@ -88,13 +90,15 @@ func (crd *commandHandler) Next() ([]string, error) {
 			c = c + p + len(separator)
 
 			if int64(len(result)) == totalArgsCount {
+				originCmd := crd.stream[:c]
 				crd.stream = crd.stream[c:]
-				return result, nil
+				return originCmd, result, nil
 			}
 		}
 	}
 
-	return  result, nil
+	originCmd := crd.stream[:c]
+	return originCmd, result, nil
 }
 
 func (cmd *commandHandler) WriteString(str string) error {
@@ -115,76 +119,96 @@ func (cmd *commandHandler) Write(bs []byte) error {
 
 func handleConn(conn net.Conn, db *DB) {
 	defer func() {
-		//if r := recover(); r != nil {
-		//	logrus.Errorf("connection to %s failed due to reason: %s", conn.RemoteAddr().String(), r)
-		//}
+		if r := recover(); r != nil {
+			logrus.Errorf("connection to %s failed due to reason: %s", conn.RemoteAddr().String(), r)
+		}
 		logrus.Infof("connection closed. remote addr: %s", conn.RemoteAddr().String())
 
-		connCounterGauge.Dec()
+		connCounterMetric.Dec()
 	}()
 
-	cmdhdr := newCommandHandler(conn)
+	cmdhdr := newCommandHandler(conn, conn, conn)
 
+	err := executeLoop(cmdhdr, db)
+	if err != nil {
+		logrus.Fatalf("excuteLoop error. err: %s", err.Error())
+	}
+}
+
+func executeLoop(cmdhdr *commandHandler, db *DB) error {
 	for {
-		//s := time.Now()
-		cmd, err := cmdhdr.Next()
-		//logrus.Infof("%s cost %f", conn.RemoteAddr(), time.Now().Sub(s).Seconds())
-
+		originCmd, cmd, err := cmdhdr.Next()
+		err = executeCmd(cmdhdr, db, originCmd, cmd, err)
 		if err != nil {
 			if err == io.EOF {
-				err := conn.Close()
-				if err != nil {
-					logrus.Errorf("close error %s\n", err.Error())
-				}
-				return
+				return nil
 			} else {
-				logrus.Fatalf("error happened when parse command.")
+				logrus.Fatalf("executeCmd in net executeLoop error. err : %s", err.Error())
 			}
-		}
-
-		logrus.Debugf("recv cmd: %s", cmd)
-		recvCmdCount.Inc()
-
-		var switchError error
-		switch cmd[0] {
-		case "set":
-			switchError = db.SetString(cmd[1], cmd[2])
-			if switchError == nil {
-				cmdhdr.WriteString(respOK)
-			}
-		case "get":
-			val, err := db.GetString(cmd[1])
-			if err != nil {
-				if err == NotFoundError {
-					cmdhdr.WriteString(fmt.Sprintf("$-1\r\n"))
-				} else {
-					switchError = err
-				}
-			} else {
-				cmdhdr.WriteString(fmt.Sprintf("$%d\r\n%s\r\n",len(val), val))
-			}
-		case "del":
-			var result []bool
-			result, switchError := db.DeleteString(cmd[1:]...)
-			if switchError == nil {
-				var deleteCount int
-				for _, realDel := range result {
-					if realDel {
-						deleteCount++
-					}
-				}
-				cmdhdr.Write([]byte(fmt.Sprintf(":%d\r\n", deleteCount)))
-			}
-
-		default:
-			logrus.Errorf("unsupport cmd %s", cmd[0])
-		}
-		if switchError != nil {
-			_, err := conn.Write([]byte(respError))
-			if err != nil {
-				logrus.Fatalf("db error. %s\n", err.Error())
-			}
-			continue
 		}
 	}
+}
+
+func executeCmd(cmdhdr *commandHandler, db *DB, originCmd []byte, cmd []string, err error) error {
+	if err != nil {
+		if err == io.EOF {
+			err = cmdhdr.Closer.Close()
+			if err != nil {
+				logrus.Errorf("close conn error %s\n", err.Error())
+				return err
+			}
+			return io.EOF
+		} else {
+			logrus.Errorf("error happened when parse command. err: %s", err.Error())
+			return err
+		}
+	}
+
+	logrus.Debugf("recv cmd: %s", cmd)
+	recvCmdCountMetric.Inc()
+
+	var switchError error
+	switch cmd[0] {
+	case "set":
+		switchError = db.SetString(originCmd, cmd[1], cmd[2])
+		if switchError == nil {
+			cmdhdr.WriteString(respOK)
+		}
+	case "get":
+		val, err := db.GetString(cmd[1])
+		if err != nil {
+			if err == NotFoundError {
+				cmdhdr.WriteString(fmt.Sprintf("$-1\r\n"))
+			} else {
+				switchError = err
+			}
+		} else {
+			cmdhdr.WriteString(fmt.Sprintf("$%d\r\n%s\r\n",len(val), val))
+		}
+	case "del":
+		var result []bool
+		result, switchError := db.DeleteString(originCmd, cmd[1:]...)
+		if switchError == nil {
+			var deleteCount int
+			for _, realDel := range result {
+				if realDel {
+					deleteCount++
+				}
+			}
+			cmdhdr.Write([]byte(fmt.Sprintf(":%d\r\n", deleteCount)))
+		}
+
+	default:
+		logrus.Errorf("unsupport cmd %s", cmd[0])
+	}
+	if switchError != nil {
+		logrus.Errorf("hanlde cmd error. err %s", switchError.Error())
+		_, err := cmdhdr.Writer.Write([]byte(respError))
+		if err != nil {
+			logrus.Errorf("db error. %s\n", err.Error())
+			return err
+		}
+	}
+
+	return nil
 }
